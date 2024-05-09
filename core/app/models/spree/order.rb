@@ -575,6 +575,27 @@ module Spree
       additional_tax_total + included_tax_total
     end
 
+    def matching_credits
+      matching_store_credits = user.store_credits.where(currency: currency)
+
+      return [] unless matching_store_credits.any?
+
+      sorter = Spree::Config.store_credit_prioritizer_class.new(matching_store_credits, self)
+    end
+
+    def create_payment_from_credit(credit, remaining_total)
+      break if remaining_total.zero?
+      next if credit.amount_remaining.zero?
+
+      amount_to_take = [credit.amount_remaining, remaining_total].min
+      payments.create!(source: credit,
+                        payment_method: payment_method,
+                        amount: amount_to_take,
+                        state: 'checkout',
+                        response_code: credit.generate_authorization_code)
+      remaining_total -= amount_to_take
+    end
+
     def add_store_credit_payments
       return if user.nil?
       return if payments.store_credits.checkout.empty? && user.available_store_credit_total(currency: currency).zero?
@@ -585,28 +606,11 @@ module Spree
       # turned off, and one of the payments fails when the user tries to
       # complete the order, which sends the order back to the 'payment' state.
       authorized_total = payments.pending.sum(:amount)
-
       remaining_total = outstanding_balance - authorized_total
 
-      matching_store_credits = user.store_credits.where(currency: currency)
+      payment_method = Spree::PaymentMethod::StoreCredit.first
 
-      if matching_store_credits.any?
-        payment_method = Spree::PaymentMethod::StoreCredit.first
-        sorter = Spree::Config.store_credit_prioritizer_class.new(matching_store_credits, self)
-
-        sorter.call.each do |credit|
-          break if remaining_total.zero?
-          next if credit.amount_remaining.zero?
-
-          amount_to_take = [credit.amount_remaining, remaining_total].min
-          payments.create!(source: credit,
-                           payment_method: payment_method,
-                           amount: amount_to_take,
-                           state: 'checkout',
-                           response_code: credit.generate_authorization_code)
-          remaining_total -= amount_to_take
-        end
-      end
+      matching_credits.map { |credit| create_payment_from_credit(credit, remaining_total) }
 
       other_payments = payments.checkout.not_store_credits
       if remaining_total.zero?
